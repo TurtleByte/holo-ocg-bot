@@ -90,13 +90,11 @@ class Ruling:
         self.answer = answer
 
 
-bpCount = 8
-sdCount = 16
-ebCount = 1
 pricecsvs = []
 cardDict = {}
 rulingDict = {}
 historyDict = {}
+en_image_dict = {}
 
 history_df = pd.DataFrame() 
 
@@ -127,12 +125,26 @@ def acronymize(string):
         return "".join(e[0] for e in string.split())
 
 def startupRoutine():
-    global cardDict, rulingDict, historyDict, pricecsvs
+    global cardDict, rulingDict, historyDict, pricecsvs, en_image_dict
 
     pricecsvs = []
     cardDict = {}
     rulingDict = {}
     historyDict = {}
+    en_image_dict = {}
+
+    try:
+        with open('dirlist.txt', 'r', encoding='UTF-8') as f:
+            for line in f:
+                filename = line.strip()
+                match = re.match(r'EN_([a-zA-Z0-9-]+)_', filename)
+                if match:
+                    setcode = match.group(1).lower()
+                    if setcode not in en_image_dict:
+                        en_image_dict[setcode] = []
+                    en_image_dict[setcode].append(filename)
+    except Exception as e:
+        print(f"Could not load dirlist.txt: {e}")
 
     with open('mastersheet.csv', newline='', encoding='UTF-8') as myFile:
         reader = csv.reader(myFile)
@@ -146,34 +158,19 @@ def startupRoutine():
         for row in reader:
             rulingDict[int(row[0])] = Ruling(row[0], row[1], row[2])
     
-    url_list = []
-
-    for i in range(1, bpCount + 1):
-        if i < 10: 
-            url_list.append("hbp0" + str(i))
-        else:
-            url_list.append("hbp" + str(i))
-    for i in range(1, sdCount + 1):
-        if i < 10: 
-            url_list.append("hsd0" + str(i))
-        else:
-            url_list.append("hsd" + str(i))
-    for i in range(1, ebCount + 1):
-        if i < 10: 
-            url_list.append("heb0" + str(i))
-        else:
-            url_list.append("heb" + str(i))
-    url_list = url_list + ['ohc01', 'hys01', 'yell01', 'promo-100', 'promo-hbp10', 'promo-hsd10', 'promo-hbd20']
-
-    for url in url_list:
-        print("Checking", url)
-        fullurl = "https://yuyu-tei.jp/sell/hocg/s/" + url
+    def scrape_yyt_url(url_segment):
+        fullurl = "https://yuyu-tei.jp/sell/hocg/s/" + url_segment
+        print("Checking", url_segment)
         headers = {"User-Agent": "Mozilla/5.0"}
         res = requests.get(fullurl, headers=headers)
+            
         res.encoding = res.apparent_encoding 
         soup = BeautifulSoup(res.text, "html.parser")
-
         mydivs = soup.find_all("div", {"class": "card-product"})
+
+        # If no cards are found, return False to signal the loop to stop
+        if not mydivs:
+            return False
 
         for idx in range(len(mydivs)):
             setcode = mydivs[idx].find_all("span")[0].text
@@ -190,6 +187,23 @@ def startupRoutine():
             if setcode.lower() not in cardDict:
                 cardDict[setcode.lower()] = Card(setcode, "", "", "", rarity, "", "", "", "", "", "","")
             cardDict[setcode.lower()].addPrice(CardPrice(rarity, price, imgurl))
+        return True
+
+    prefixes = ["hbp", "hsd", "heb"]
+    for prefix in prefixes:
+        i = 1
+        while True:
+            num_str = f"0{i}" if i < 10 else str(i)
+            url_segment = f"{prefix}{num_str}"
+            success = scrape_yyt_url(url_segment)
+            if not success:
+                print(f"No card information found for {url_segment}, stopping {prefix} sequence.")
+                break
+            i += 1
+
+    static_url_list = ['ohc01', 'hys01', 'yell01', 'promo-100', 'promo-hbp10', 'promo-hsd10', 'promo-hbd20']
+    for url_segment in static_url_list:
+        scrape_yyt_url(url_segment)
     
     groupList = []
     
@@ -366,36 +380,119 @@ class ListPaginator(discord.ui.View):
         self.update_buttons()
         await interaction.response.edit_message(embed=self.get_embed(self.index), view=self)
 
-
-def cardEmbedMaker(input):
+def cardEmbedMaker(input, lang="EN", index=0, gallery_mode=False):
     card = cardDict[input.lower()]
     embed = discord.Embed(title=card.setcode, colour=textToColor(card.color))
+    
+    display_rarity = card.rarity
+    image_url = ""
+    is_en_match = lang == "EN" and card.setcode.lower() in en_image_dict
+    
+    if is_en_match:
+        safe_index = index if index < len(en_image_dict[card.setcode.lower()]) else 0
+        filename = en_image_dict[card.setcode.lower()][safe_index]
+        image_url = "https://raw.githubusercontent.com/TurtleByte/holo-ocg-bot/refs/heads/main/imagesEN/" + filename
+        
+        # If in gallery mode, extract the rarity from the filename (e.g., EN_hBP01-007_SEC_sa5u.png -> SEC)
+        if gallery_mode:
+            parts = filename.split('_')
+            if len(parts) >= 4:
+                display_rarity = "_".join(parts[2:-1])
+    else:
+        image_url = "https://raw.githubusercontent.com/TurtleByte/holo-ocg-bot/refs/heads/main/images/" + card.setcode + ".png"
+
     attText = ""
     attText += "**Name:** " + card.name +"\n"
     attText += "**Pack:** " + card.pack + "\n"
-    attText += "**Rarity**: " + card.rarity + "\n"
+    attText += "**Rarity**: " + display_rarity + "\n"
     embed.add_field(name="Info", value=attText, inline=True)
-    attText = ""
-    attText += "**Type**: " + card.type + "\n"
-    if len(card.color) > 0:
-        attText += "**Color**: " + card.color + "\n"
-    if card.rarity == "OSR" and len(card.life) > 0:
-        attText += "**Life**: " + card.life + "\n"
-    elif len(card.life) > 0:
-        attText += "**HP**: " + card.life + "\n"
-    if len(card.batonpass) > 0:
-        attText += "**Baton Pass**: " + card.batonpass + "\n"
-    if len(card.tags) > 0:
-        attText += "**Tags**: " + card.tags + "\n"
-    if len(card.metatags) > 0:
-        attText += "**Meta Tags**: " + card.metatags + "\n"
-    embed.add_field(name="Attributes", value=attText, inline=True)
-    embed.add_field(name="Text", value=card.text, inline=False)
+    
+    if not gallery_mode:
+        attText = ""
+        attText += "**Type**: " + card.type + "\n"
+        if len(card.color) > 0:
+            attText += "**Color**: " + card.color + "\n"
+        if card.rarity == "OSR" and len(card.life) > 0:
+            attText += "**Life**: " + card.life + "\n"
+        elif len(card.life) > 0:
+            attText += "**HP**: " + card.life + "\n"
+        if len(card.batonpass) > 0:
+            attText += "**Baton Pass**: " + card.batonpass + "\n"
+        if len(card.tags) > 0:
+            attText += "**Tags**: " + card.tags + "\n"
+        if len(card.metatags) > 0:
+            attText += "**Meta Tags**: " + card.metatags + "\n"
+        embed.add_field(name="Attributes", value=attText, inline=True)
+        embed.add_field(name="Text", value=card.text, inline=False)
+    
     try:
-        embed.set_thumbnail(url="https://raw.githubusercontent.com/TurtleByte/holo-ocg-bot/refs/heads/main/images/" + card.setcode + ".png")
+        if gallery_mode:
+            embed.set_image(url=image_url)
+        else:
+            embed.set_thumbnail(url=image_url)
     except Exception as e:
         pass
+        
     return embed
+
+class CardLanguageView(discord.ui.View):
+    def __init__(self, invoker: discord.Member, setcode: str, active_lang: str = "EN"):
+        super().__init__(timeout=120)
+        self.invoker = invoker
+        self.setcode = setcode
+        self.active_lang = active_lang
+        self.update_buttons()
+
+    def update_buttons(self):
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                if child.custom_id == "btn_jp":
+                    child.style = discord.ButtonStyle.success if self.active_lang == "JP" else discord.ButtonStyle.secondary
+                elif child.custom_id == "btn_en":
+                    child.style = discord.ButtonStyle.success if self.active_lang == "EN" else discord.ButtonStyle.secondary
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user == self.invoker
+
+    @discord.ui.button(label='See JP Card', custom_id='btn_jp')
+    async def button_jp(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.active_lang = "JP"
+        self.update_buttons()
+        await interaction.response.edit_message(embed=cardEmbedMaker(self.setcode, "JP"), view=self)
+
+    @discord.ui.button(label='See EN Card', custom_id='btn_en')
+    async def button_en(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.active_lang = "EN"
+        self.update_buttons()
+        await interaction.response.edit_message(embed=cardEmbedMaker(self.setcode, "EN"), view=self)
+
+class CardGalleryView(discord.ui.View):
+    def __init__(self, invoker: discord.Member, setcode: str, max_index: int):
+        super().__init__(timeout=120)
+        self.invoker = invoker
+        self.setcode = setcode
+        self.index = 0
+        self.max_index = max_index
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.button_prev.disabled = self.index == 0
+        self.button_next.disabled = self.index == self.max_index
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user == self.invoker
+
+    @discord.ui.button(style=discord.ButtonStyle.gray, emoji='◀️')
+    async def button_prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index -= 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=cardEmbedMaker(self.setcode, "EN", self.index, True), view=self)
+
+    @discord.ui.button(style=discord.ButtonStyle.gray, emoji='▶️')
+    async def button_next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index += 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=cardEmbedMaker(self.setcode, "EN", self.index, True), view=self)
 
 def getEmbed(arg, thumbnailurl=-1):
     card = cardDict[arg.lower()]
@@ -440,7 +537,12 @@ class MainCog(commands.Cog):
     @app_commands.command(name='card', description='Gets a card whether by name or setcode')
     async def getcard(self, interaction: discord.Interaction, query: str):
         if query.lower() in cardDict:
-            await interaction.response.send_message(embed=cardEmbedMaker(query.lower()))
+            setcode = query.lower()
+            if setcode in en_image_dict:
+                view = CardLanguageView(interaction.user, setcode, active_lang="EN")
+                await interaction.response.send_message(embed=cardEmbedMaker(setcode, "EN"), view=view)
+            else:
+                await interaction.response.send_message(embed=cardEmbedMaker(setcode, "JP"))
         else:
             candidates = []
             args = query.split()
@@ -462,8 +564,12 @@ class MainCog(commands.Cog):
                     candidates = list(set(candidates) & set(candidatesbuffer))
             
             if len(candidates) == 1:
-                card = cardDict[candidates[0].lower()]
-                await interaction.response.send_message(embed=cardEmbedMaker(candidates[0].lower()))
+                setcode = candidates[0].lower()
+                if setcode in en_image_dict:
+                    view = CardLanguageView(interaction.user, setcode, active_lang="EN")
+                    await interaction.response.send_message(embed=cardEmbedMaker(setcode, "EN"), view=view)
+                else:
+                    await interaction.response.send_message(embed=cardEmbedMaker(setcode, "JP"))
             
             elif len(candidates) > 1:
                 candidates.sort()
@@ -486,6 +592,78 @@ class MainCog(commands.Cog):
                     return embed
 
                 # If there's more than one page, use the paginator view
+                if len(pages) > 1:
+                    view = ListPaginator(interaction.user, pages, get_page_embed)
+                    await interaction.response.send_message(embed=get_page_embed(0), view=view)
+                else:
+                    await interaction.response.send_message(embed=get_page_embed(0))
+            else:
+                embed = discord.Embed(title="Card Not Found", colour=discord.Colour(0xff0000), description="Please check the Setcode or Name.")
+                await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name='cardgallery', description='View all EN versions of a card')
+    async def cardgallery(self, interaction: discord.Interaction, query: str):
+        if query.lower() in cardDict:
+            setcode = query.lower()
+            if setcode in en_image_dict and len(en_image_dict[setcode]) > 0:
+                if len(en_image_dict[setcode]) > 1:
+                    view = CardGalleryView(interaction.user, setcode, len(en_image_dict[setcode]) - 1)
+                    await interaction.response.send_message(embed=cardEmbedMaker(setcode, "EN", 0, True), view=view)
+                else:
+                    await interaction.response.send_message(embed=cardEmbedMaker(setcode, "EN", 0, True))
+            else:
+                await interaction.response.send_message("No English versions found for this card.", ephemeral=True)
+        else:
+            candidates = []
+            args = query.split()
+            for keyword in args:
+                candidatesbuffer = []
+                for card in cardDict:
+                    cardString = (cardDict[card].setcode + " " + getname(cardDict[card].name) + " " + cardDict[card].rarity + " " + cardDict[card].color + " " + cardDict[card].type + " " + cardDict[card].tags + " " + cardDict[card].metatags).lower()
+                    cardString = re.sub(r"[^a-zA-Z0-9 +']", '', cardString) 
+                    if keyword.lower() in cardString.split():
+                        candidatesbuffer.append(cardDict[card].setcode)
+                if len(candidatesbuffer) < 1:
+                    for card in cardDict:
+                        cardString = (cardDict[card].setcode + " " + getname(cardDict[card].name) + " " + cardDict[card].rarity + " " + cardDict[card].color + " " + cardDict[card].type + " " + cardDict[card].tags + " " + cardDict[card].metatags).lower()
+                        if keyword.lower() in cardString:
+                            candidatesbuffer.append(cardDict[card].setcode)
+                if len(candidates) < 1:
+                    candidates = candidatesbuffer.copy()
+                else:
+                    candidates = list(set(candidates) & set(candidatesbuffer))
+            
+            if len(candidates) == 1:
+                setcode = candidates[0].lower()
+                if setcode in en_image_dict and len(en_image_dict[setcode]) > 0:
+                    if len(en_image_dict[setcode]) > 1:
+                        view = CardGalleryView(interaction.user, setcode, len(en_image_dict[setcode]) - 1)
+                        await interaction.response.send_message(embed=cardEmbedMaker(setcode, "EN", 0, True), view=view)
+                    else:
+                        await interaction.response.send_message(embed=cardEmbedMaker(setcode, "EN", 0, True))
+                else:
+                    await interaction.response.send_message("No English versions found for this card.", ephemeral=True)
+            
+            elif len(candidates) > 1:
+                candidates.sort()
+                
+                # Split candidates into chunks of 15
+                items_per_page = 15
+                pages = [candidates[i:i + items_per_page] for i in range(0, len(candidates), items_per_page)]
+
+                def get_page_embed(page_index):
+                    descText = 'Multiple cards found. Did you mean any of the following?\n\n'
+                    for candidate in pages[page_index]:
+                        theCard = cardDict[candidate.lower()]
+                        if 'holomem' in theCard.type:
+                            descText += "**" + theCard.setcode + '** ' + getname(theCard.name) + ' ' + theCard.rarity + ' ' + theCard.type.replace('holomem', '') + '\n'
+                        else:
+                            descText += "**" + theCard.setcode + '** ' + getname(theCard.name) + ' ' + theCard.rarity + ' ' + theCard.type + '\n'
+                    
+                    embed = discord.Embed(title="Exact Card Not Found", colour=discord.Colour(0xff0000), description=descText)
+                    embed.set_footer(text=f"Page {page_index + 1}/{len(pages)} | Please try again using the setcode.")
+                    return embed
+
                 if len(pages) > 1:
                     view = ListPaginator(interaction.user, pages, get_page_embed)
                     await interaction.response.send_message(embed=get_page_embed(0), view=view)
